@@ -2,8 +2,13 @@
 name = "cf-bypass-rust"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
 description = "Fast Cloudflare IUAM + Turnstile solver in Rust, Railway-ready"
+
+# NOTE: rust-version intentionally omitted.
+# chaser-cf's transitive deps pull in icu_* / uuid / textwrap which
+# require rustc >= 1.88/1.89. The Dockerfile pins `rust:1.90-slim-bookworm`
+# explicitly, so we don't declare a rust-version here to avoid cargo
+# trying to resolve older compatible versions.
 
 [dependencies]
 axum = "0.8"
