@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # We copy Cargo.toml + Cargo.lock, drop in a stub main.rs, and build
 # once so that all third-party crates are compiled into a cached layer.
 # Subsequent builds only recompile our own code.
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml ./
 RUN mkdir src \
     && echo "fn main() {}" > src/main.rs \
     && cargo build --release \
