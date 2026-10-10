@@ -17,8 +17,6 @@ pub struct Config {
     pub timeout_ms: u64,
     /// Max entries in the in-memory response cache.
     pub cache_max_entries: u64,
-    /// Default cache TTL in milliseconds (used when caller omits `ttl`).
-    pub cache_default_ttl_ms: u64,
 }
 
 impl Config {
@@ -33,7 +31,6 @@ impl Config {
             browser_limit: parse_env("BROWSER_LIMIT", 20_usize)?,
             timeout_ms: parse_env("TIMEOUT_MS", 60_000_u64)?,
             cache_max_entries: parse_env("CACHE_MAX_ENTRIES", 10_000_u64)?,
-            cache_default_ttl_ms: parse_env("CACHE_TTL_MS", 30 * 60 * 1000_u64)?,
         })
     }
 }
@@ -57,8 +54,8 @@ where
 ///
 /// Railway historically injects `PORT=0` on some services, which in Linux
 /// means "bind to a kernel-assigned random port". That would make Railway's
-/// proxy unable to route traffic to us. We therefore treat 0 (and unset/empty)
-/// as "use the standard Railway port 8080".
+/// proxy unable to route traffic to us. We therefore treat 0 (and
+/// unset/empty) as "use the standard Railway port 8080".
 fn parse_port_env() -> Result<u16, ConfigError> {
     let port = parse_env("PORT", 8080_u16)?;
     Ok(if port == 0 { 8080 } else { port })

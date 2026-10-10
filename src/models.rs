@@ -3,6 +3,9 @@
 use serde::{Deserialize, Serialize};
 
 /// Incoming /cloudflare request body.
+///
+/// `#[serde(default)]` on optional fields means clients can omit them
+/// freely; unknown fields sent by clients are ignored by default.
 #[derive(Debug, Clone, Deserialize)]
 pub struct BypassRequest {
     /// "iuam" or "turnstile".
@@ -15,9 +18,6 @@ pub struct BypassRequest {
     /// Optional proxy. String or object — see `proxy.rs`.
     #[serde(default)]
     pub proxy: Option<crate::proxy::ProxyInput>,
-    /// Optional cache TTL override in milliseconds.
-    #[serde(default)]
-    pub ttl: Option<u64>,
     /// Shared secret sent when AUTH_TOKEN is configured on the server.
     #[serde(default, rename = "authToken")]
     pub auth_token: Option<String>,

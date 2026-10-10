@@ -15,9 +15,6 @@ pub enum AppError {
     #[error("unauthorized")]
     Unauthorized,
 
-    #[error("too many requests")]
-    TooManyRequests,
-
     #[error("solve failed: {0}")]
     SolveFailed(String),
 
@@ -30,7 +27,6 @@ impl IntoResponse for AppError {
         let (status, code) = match &self {
             AppError::BadRequest(_) => (StatusCode::BAD_REQUEST, 400),
             AppError::Unauthorized => (StatusCode::UNAUTHORIZED, 401),
-            AppError::TooManyRequests => (StatusCode::TOO_MANY_REQUESTS, 429),
             AppError::SolveFailed(_) => (StatusCode::INTERNAL_SERVER_ERROR, 500),
             AppError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, 500),
         };

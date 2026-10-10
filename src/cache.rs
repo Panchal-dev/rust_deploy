@@ -6,6 +6,10 @@ use std::time::Duration;
 
 /// Cache used for non-proxied IUAM results (they are IP-scoped, so we only
 /// store the ones tied to this server's egress IP).
+///
+/// A single global TTL of 30 minutes is applied at construction. Per-entry
+/// TTL overrides are not supported by moka 0.12's simple insert API; the
+/// global ceiling is sufficient for our use-case.
 #[derive(Clone)]
 pub struct TtlCache {
     inner: Cache<String, BypassResponse>,
@@ -13,8 +17,7 @@ pub struct TtlCache {
 
 impl TtlCache {
     /// Create a new cache with a hard cap on entry count and a global TTL of
-    /// 30 minutes. Per-request TTLs are honoured at insert time via
-    /// `insert_with_ttl`, but the global TTL acts as a safety ceiling.
+    /// 30 minutes.
     pub fn new(max_entries: u64) -> Self {
         Self {
             inner: Cache::builder()
@@ -29,12 +32,8 @@ impl TtlCache {
         self.inner.get(key).await
     }
 
-    /// Insert a response. `ttl_ms` is applied as a per-entry TTL.
+    /// Insert a response using the cache's global TTL.
     pub async fn set(&self, key: String, value: BypassResponse) {
-        // moka's per-entry TTL API is `insert_with_ttl` in recent versions.
-        // For simplicity and forward-compatibility, we rely on the global TTL
-        // configured at construction. Per-request TTLs can be wired in later
-        // without affecting callers of this method.
         self.inner.insert(key, value).await;
     }
 }

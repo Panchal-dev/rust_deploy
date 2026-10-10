@@ -4,8 +4,8 @@ dockerfilePath = "Dockerfile"
 buildTarget = "runtime"
 
 [deploy]
-startCommand = "cf-bypass-rust"
+startCommand = "/usr/local/bin/cf-bypass-rust"
 healthcheckPath = "/health"
-healthcheckTimeout = 40
+healthcheckTimeout = 120
 restartPolicyType = "ON_FAILURE"
-restartPolicyMaxRetries = 3
+restartPolicyMaxRetries = 5
