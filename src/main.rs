@@ -1,14 +1,8 @@
-use axum::{
-    body::Body,
-    http::{Request, StatusCode},
-    routing::get,
-    Json, Router,
-};
+use axum::{routing::get, Json, Router};
 use serde_json::{json, Value};
 use std::env;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
-use tower::ServiceExt; // for `.oneshot()` in tests
 
 // ============================================================
 // HANDLERS
@@ -75,7 +69,10 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
     use http_body_util::BodyExt;
+    use tower::ServiceExt; // only needed in tests
 
     /// Helper: call router and return (status, json body)
     async fn call_route(path: &str) -> (StatusCode, Value) {
