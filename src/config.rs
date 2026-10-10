@@ -28,7 +28,7 @@ impl Config {
     /// so that misconfigurations never surface as runtime 500s.
     pub fn from_env() -> Result<Self, ConfigError> {
         Ok(Self {
-            port: parse_env("PORT", 8742_u16)?,
+            port: parse_port_env()?,
             auth_token: env::var("AUTH_TOKEN").ok().filter(|s| !s.is_empty()),
             browser_limit: parse_env("BROWSER_LIMIT", 20_usize)?,
             timeout_ms: parse_env("TIMEOUT_MS", 60_000_u64)?,
@@ -51,6 +51,17 @@ where
             .map_err(|e| ConfigError(format!("invalid {name}: {e}"))),
         _ => Ok(default),
     }
+}
+
+/// Parse the PORT env var with Railway-safe semantics.
+///
+/// Railway historically injects `PORT=0` on some services, which in Linux
+/// means "bind to a kernel-assigned random port". That would make Railway's
+/// proxy unable to route traffic to us. We therefore treat 0 (and unset/empty)
+/// as "use the standard Railway port 8080".
+fn parse_port_env() -> Result<u16, ConfigError> {
+    let port = parse_env("PORT", 8080_u16)?;
+    Ok(if port == 0 { 8080 } else { port })
 }
 
 /// Configuration error surfaced at startup.
