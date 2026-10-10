@@ -1,54 +1,50 @@
 # ============================================================
-# STAGE 1: Chef — base image with cargo-chef
+# STAGE 1: Builder — Rust toolchain + cargo cache
 # ============================================================
-FROM lukemathwalker/cargo-chef:latest-rust-1 AS chef
+FROM rust:1.85-slim-bookworm AS builder
 WORKDIR /app
 
-# ============================================================
-# STAGE 2: Planner — generate dependency recipe
-# ============================================================
-FROM chef AS planner
-COPY . .
-RUN cargo chef prepare --recipe-path recipe.json
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        pkg-config \
+        libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Cache dependency compilation
+COPY Cargo.toml ./
+RUN mkdir src && echo "fn main() {}" > src/main.rs \
+    && cargo build --release \
+    && rm -rf src
+
+# Build the real project
+COPY src ./src
+RUN cargo build --release --bin cf-bypass-rust
 
 # ============================================================
-# STAGE 3: Builder — cook deps + build binary
-# ============================================================
-FROM chef AS builder
-COPY --from=planner /app/recipe.json recipe.json
-
-# Cache dependencies (this layer rebuilds only when Cargo.toml changes)
-RUN cargo chef cook --release --recipe-path recipe.json
-
-# Build actual app
-COPY . .
-RUN cargo build --release --bin railway-rust-test
-
-# ============================================================
-# STAGE 4: Runtime — minimal Debian image
+# STAGE 2: Runtime — slim Debian + Chromium + Xvfb
 # ============================================================
 FROM debian:bookworm-slim AS runtime
 WORKDIR /app
 
-# Install CA certs (needed for HTTPS outbound) + curl (for healthcheck)
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
+        chromium \
+        chromium-driver \
+        xvfb \
+        fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy compiled binary
-COPY --from=builder /app/target/release/railway-rust-test /usr/local/bin/railway-rust-test
+ENV CHROME_BIN=/usr/bin/chromium
+ENV PORT=8742
+EXPOSE 8742
 
-# Non-root user (security best practice)
+COPY --from=builder /app/target/release/cf-bypass-rust /usr/local/bin/cf-bypass-rust
+
+# Non-root user
 RUN useradd -m -s /bin/bash appuser
 USER appuser
 
-# Railway injects PORT at runtime; default 3000 for local
-ENV PORT=3000
-EXPOSE 3000
-
-# Container-level healthcheck
-HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=25s --retries=3 \
     CMD curl -f http://localhost:${PORT}/health || exit 1
 
-CMD ["railway-rust-test"]
+CMD ["cf-bypass-rust"]

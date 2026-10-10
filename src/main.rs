@@ -1,152 +1,155 @@
-use axum::{routing::get, Json, Router};
-use serde_json::{json, Value};
-use std::env;
+//! cf-bypass-rust — Cloudflare IUAM + Turnstile solver.
+//!
+//! HTTP API:
+//!   GET  /health      -> readiness probe
+//!   POST /cloudflare  -> solve IUAM or Turnstile for a domain
+//!
+//! Configuration is read from environment variables (see `config.rs`).
+
+mod browser;
+mod cache;
+mod config;
+mod ends;
+mod error;
+mod models;
+mod proxy;
+
 use std::net::SocketAddr;
+use std::sync::Arc;
+
+use axum::{
+    extract::State,
+    routing::{get, post},
+    Json, Router,
+};
 use tokio::net::TcpListener;
+use tracing_subscriber::EnvFilter;
 
-// ============================================================
-// HANDLERS
-// ============================================================
+use crate::browser::BrowserManager;
+use crate::cache::TtlCache;
+use crate::config::Config;
+use crate::error::AppError;
+use crate::models::{BypassRequest, BypassResponse, HealthResponse};
 
-/// Health check endpoint — Railway uses this for zero-downtime deploy
-async fn health() -> Json<Value> {
-    Json(json!({
-        "status": "ok",
-        "service": "railway-rust-test",
-        "timestamp": chrono::Utc::now().to_rfc3339()
-    }))
+/// Shared application state — cheap to clone (Arc + moka cache is internally
+/// shared), so Axum can hand it to every handler without contention.
+#[derive(Clone)]
+pub struct AppState {
+    pub browser: Arc<BrowserManager>,
+    pub cache: TtlCache,
+    pub config: Arc<Config>,
 }
-
-/// Root endpoint
-async fn root() -> Json<Value> {
-    Json(json!({
-        "message": "Rust app running on Railway",
-        "version": env!("CARGO_PKG_VERSION")
-    }))
-}
-
-/// Build the router (shared between main and tests)
-fn build_app() -> Router {
-    Router::new()
-        .route("/", get(root))
-        .route("/health", get(health))
-}
-
-// ============================================================
-// MAIN
-// ============================================================
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
-    // Railway auto-injects PORT env variable
-    let port: u16 = env::var("PORT")
-        .unwrap_or_else(|_| "3000".to_string())
-        .parse()
-        .expect("PORT must be a valid number");
+    let config = Arc::new(Config::from_env()?);
+    tracing::info!(?config, "configuration loaded");
 
-    // Must bind to 0.0.0.0 so Railway's proxy can reach it
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let browser = Arc::new(BrowserManager::new(&config).await?);
+    tracing::info!("browser solver ready");
 
-    tracing::info!("🚀 Starting server on {}", addr);
+    let state = AppState {
+        browser,
+        cache: TtlCache::new(config.cache_max_entries),
+        config: config.clone(),
+    };
 
-    let app = build_app();
-    let listener = TcpListener::bind(addr).await.unwrap();
+    let app = Router::new()
+        .route("/health", get(health))
+        .route("/cloudflare", post(cloudflare))
+        .with_state(state);
 
-    axum::serve(listener, app).await.unwrap();
+    let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
+    tracing::info!("🚀 listening on {addr}");
+
+    let listener = TcpListener::bind(addr).await?;
+    axum::serve(listener, app).await?;
+    Ok(())
 }
 
-// ============================================================
-// TESTS — All in one file
-// ============================================================
+/// Liveness / readiness probe.
+async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
+    Json(HealthResponse {
+        status: "ok",
+        service: "cf-bypass-rust",
+        uptime_seconds: state.browser.uptime_seconds(),
+        contexts_available: state.browser.contexts_available(),
+        auth_required: state.config.auth_token.is_some(),
+    })
+}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use axum::body::Body;
-    use axum::http::{Request, StatusCode};
-    use http_body_util::BodyExt;
-    use tower::ServiceExt; // only needed in tests
+/// POST /cloudflare — solve the requested challenge mode.
+async fn cloudflare(
+    State(state): State<AppState>,
+    Json(req): Json<BypassRequest>,
+) -> Result<Json<BypassResponse>, AppError> {
+    let start = std::time::Instant::now();
 
-    /// Helper: call router and return (status, json body)
-    async fn call_route(path: &str) -> (StatusCode, Value) {
-        let app = build_app();
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri(path)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        let status = response.status();
-        let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
-        let json: Value = serde_json::from_slice(&body_bytes).unwrap_or(Value::Null);
-        (status, json)
+    // ---- 1. Authentication ------------------------------------------------
+    if let Some(expected) = &state.config.auth_token {
+        if req.auth_token.as_deref() != Some(expected.as_str()) {
+            return Err(AppError::Unauthorized);
+        }
     }
 
-    // ---------- TEST 1: /health ----------
-    #[tokio::test]
-    async fn test_health_returns_200() {
-        let (status, _) = call_route("/health").await;
-        assert_eq!(status, StatusCode::OK);
+    // ---- 2. Validate mode -------------------------------------------------
+    let mode = req.mode.as_str();
+    if mode != "iuam" && mode != "turnstile" {
+        return Err(AppError::BadRequest(format!("unknown mode: {mode}")));
     }
 
-    #[tokio::test]
-    async fn test_health_body_status_ok() {
-        let (_, json) = call_route("/health").await;
-        assert_eq!(json["status"], "ok");
-        assert_eq!(json["service"], "railway-rust-test");
+    // ---- 3. Normalise proxy ----------------------------------------------
+    let proxy = proxy::normalize(req.proxy.clone())?;
+
+    // ---- 4. Cache lookup (IUAM + no proxy only) --------------------------
+    let cache_key = if mode == "iuam" && proxy.is_none() {
+        Some(req.domain.clone())
+    } else {
+        None
+    };
+
+    if let Some(key) = &cache_key {
+        if let Some(hit) = state.cache.get(key).await {
+            tracing::debug!(domain = %req.domain, "cache hit");
+            return Ok(Json(BypassResponse {
+                cached: true,
+                elapsed: format!("{:.2}s", start.elapsed().as_secs_f64()),
+                ..hit
+            }));
+        }
     }
 
-    #[tokio::test]
-    async fn test_health_has_timestamp() {
-        let (_, json) = call_route("/health").await;
-        assert!(json["timestamp"].is_string());
-        let ts = json["timestamp"].as_str().unwrap();
-        assert!(!ts.is_empty());
+    // ---- 5. Solve ---------------------------------------------------------
+    let result = match mode {
+        "iuam" => ends::iuam::solve(&state.browser, &req.domain, proxy.as_ref()).await,
+        "turnstile" => {
+            let site_key = req
+                .site_key
+                .as_deref()
+                .ok_or_else(|| AppError::BadRequest("siteKey required for turnstile".into()))?;
+            ends::turnstile::solve(&state.browser, &req.domain, site_key, proxy.as_ref()).await
+        }
+        _ => unreachable!(),
+    }?;
+
+    let response = BypassResponse {
+        elapsed: format!("{:.2}s", start.elapsed().as_secs_f64()),
+        cached: false,
+        ..result
+    };
+
+    // ---- 6. Store in cache (IUAM + no proxy + success only) --------------
+    if let Some(key) = cache_key {
+        if response.cf_clearance.is_some() {
+            state.cache.set(key, response.clone()).await;
+        }
     }
 
-    // ---------- TEST 2: / ----------
-    #[tokio::test]
-    async fn test_root_returns_200() {
-        let (status, _) = call_route("/").await;
-        assert_eq!(status, StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn test_root_contains_railway() {
-        let (_, json) = call_route("/").await;
-        assert!(json["message"].as_str().unwrap().contains("Railway"));
-    }
-
-    #[tokio::test]
-    async fn test_root_has_version() {
-        let (_, json) = call_route("/").await;
-        assert_eq!(json["version"], env!("CARGO_PKG_VERSION"));
-    }
-
-    // ---------- TEST 3: 404 ----------
-    #[tokio::test]
-    async fn test_unknown_route_returns_404() {
-        let (status, _) = call_route("/does-not-exist").await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
-    }
-
-    // ---------- TEST 4: PORT env parsing ----------
-    #[test]
-    fn test_port_env_parse() {
-        std::env::set_var("PORT", "8080");
-        let port: u16 = std::env::var("PORT").unwrap().parse().unwrap();
-        assert_eq!(port, 8080);
-        std::env::remove_var("PORT");
-    }
+    Ok(Json(response))
 }
